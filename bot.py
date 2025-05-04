@@ -4,7 +4,7 @@ import json
 from telegram import Bot
 from config import TELEGRAM_TOKEN, CHAT_ID
 
-bot = Bot(token=7822793701:AAF419DsT6LbgLfw0SGH-LVAADhN8J_HGwI)
+bot = Bot(token="7822793701:AAF419DsT6LbgLfw0SGH-LVAADhN8J_HGwI")
 
 def format_price(ton_value):
     return f"{ton_value / 1e9:.2f}"
