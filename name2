@@ -1,0 +1,165 @@
+# bot.py
+import asyncio
+import aiohttp
+import re
+import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import FSInputFile, KeyboardButton, ReplyKeyboardMarkup
+
+# ──────── ВСТАВЬ СВОИ ДАННЫЕ ────────
+TOKEN = "777777777:AAE..."          # ← твой токен
+ALLOWED_ID = 123456789              # ← твой Telegram ID
+# ─────────────────────────────────────
+
+BASE_URL = "https://raw.githubusercontent.com/karpov1803/name/main/"
+GITHUB_URL = "https://github.com/karpov1803/name"
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+task = None
+stop_event = None
+current_file = None
+
+# ──────── Получить список .txt файлов ────────
+async def get_file_list():
+    async with aiohttp.ClientSession() as s:
+        async with s.get(GITHUB_URL) as r:
+            html = await r.text()
+    return re.findall(r'/blob/main/([^"]+\.txt)"', html)
+
+# ──────── Клавиатура с файлами ────────
+async def files_kb():
+    files = await get_file_list()
+    buttons = [KeyboardButton(text=f"📄 {f}") for f in files]
+    buttons += [
+        KeyboardButton(text="Обновить список"),
+        KeyboardButton(text="СТАРТ"),
+        KeyboardButton(text="СТОП"),
+        KeyboardButton(text="Статус")
+    ]
+    # ← ОДНА пара квадратных скобок!
+    return ReplyKeyboardMarkup(
+        keyboard=[buttons[i:i+2] for i in range(0, len(buttons), 2)],
+        resize_keyboard=True
+    )
+
+# ──────── Загрузка списка ────────
+async def load_usernames(name):
+    url = BASE_URL + name
+    async with aiohttp.ClientSession() as s:
+        async with s.get(url) as r:
+            if r.status != 200: return []
+            text = await r.text()
+    return [line.strip() for line in text.splitlines() if line.strip() and len(line.strip()) >= 5]
+
+# ──────── Проверка имени ────────
+async def check(name, session):
+    if stop_event.is_set(): return None
+    try:
+        async with session.get(f"https://fragment.com/username/{name.lower()}", timeout=8) as r:
+            if "available" not in await r.text(): return None
+        async with session.get(f"https://t.me/{name}", timeout=8) as r:
+            if "empty" not in await r.text(): return None
+        return name
+    except:
+        return None
+
+# ──────── Основная проверка ────────
+async def start_checking(message: types.Message, file_name):
+    global task, stop_event, current_file
+    if task and not task.done():
+        return await message.answer("Уже идёт проверка!")
+    
+    current_file = file_name
+    stop_event = asyncio.Event()
+    usernames = await load_usernames(file_name)
+    if not usernames:
+        return await message.answer("Файл пустой")
+
+    await message.answer(
+        f"Запускаю проверку\n📄 {file_name}\nВсего: {len(usernames)}",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    
+    free = []
+    async with aiohttp.ClientSession() as session:
+        for i, name in enumerate(usernames, 1):
+            if stop_event.is_set():
+                await message.answer("Остановлено!")
+                break
+            res = await check(name, session)
+            if res:
+                free.append(res)
+                await message.answer(f"@{res}")
+            if i % 15 == 0:
+                await message.answer(f"{i}/{len(usernames)}")
+            await asyncio.sleep(1.1)
+
+    if free:
+        path = "free.txt"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(f"@{x}" for x in free))
+        await message.answer(f"ГОТОВО! Найдено: {len(free)}")
+        await bot.send_document(message.chat.id, FSInputFile(path), caption=file_name)
+    else:
+        await message.answer("Ничего не найдено")
+
+    task = None
+    await message.answer("Готов к новой проверке!", reply_markup=await files_kb())
+
+# ──────── Хэндлеры ────────
+@dp.message(Command("start"))
+async def start(m: types.Message):
+    if m.from_user.id != ALLOWED_ID:
+        return await m.answer("Доступ запрещён")
+    await m.answer(
+        "Привет!\nВыбери файл из папки → СТАРТ",
+        reply_markup=await files_kb()
+    )
+
+@dp.message(lambda m: m.text and m.text.startswith("📄 "))
+async def select_file(m: types.Message):
+    global current_file
+    current_file = m.text[2:].strip()
+    await m.answer(
+        f"Выбран: {current_file}\nЖми СТАРТ",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton("СТАРТ"), KeyboardButton("СТОП")]],
+            resize_keyboard=True
+        )
+    )
+
+@dp.message(lambda m: m.text == "СТАРТ")
+async def btn_start(m: types.Message):
+    if not current_file:
+        return await m.answer("Сначала выбери файл!")
+    global task
+    task = asyncio.create_task(start_checking(m, current_file))
+
+@dp.message(lambda m: m.text == "СТОП")
+async def btn_stop(m: types.Message):
+    global task, stop_event
+    if stop_event: stop_event.set()
+    if task: task.cancel()
+    await m.answer("Остановлено!")
+
+@dp.message(lambda m: m.text == "Обновить список")
+async def refresh(m: types.Message):
+    await m.answer("Обновляю...", reply_markup=await files_kb())
+
+@dp.message(lambda m: m.text == "Статус")
+async def status(m: types.Message):
+    if task and not task.done():
+        await m.answer("Проверка идёт...")
+    else:
+        await m.answer(f"Файл: {current_file or 'не выбран'}")
+
+# ──────── Запуск ────────
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
